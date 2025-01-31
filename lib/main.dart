@@ -1,8 +1,57 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
 
 void main() {
   runApp(const MyApp());
+}
+
+class ThousandsSeparatorInputFormatter extends TextInputFormatter {
+  // Setup a formatter that supports both commas for thousands and decimals
+  final formatter = NumberFormat("#,##0.###");
+
+  @override
+  TextEditingValue formatEditUpdate(
+      TextEditingValue oldValue, TextEditingValue newValue) {
+    if (newValue.text.isEmpty) {
+      return newValue;
+    }
+    // Remove commas to check the new input and for parsing
+    final newText = newValue.text.replaceAll(',', '');
+    // Try parsing the input as a double
+    final num? newTextAsNum = num.tryParse(newText);
+
+    if (newTextAsNum == null) {
+      return oldValue; // Return old value if new value is not a number
+    }
+
+    // Split the input into whole number and decimal parts
+    final parts = newText.split('.');
+    if (parts.length > 1) {
+      // If there's a decimal part, format accordingly
+      final integerPart = int.tryParse(parts[0]) ?? 0;
+      final decimalPart = parts[1];
+      // Handle edge case where decimal part is present but empty (user just typed the dot)
+      final formattedText = '${formatter.format(integerPart)}.$decimalPart';
+      return TextEditingValue(
+        text: formattedText,
+        selection: updateCursorPosition(formattedText),
+      );
+    } else {
+      // No decimal part, format the whole number
+      final newFormattedText = formatter.format(newTextAsNum);
+      return TextEditingValue(
+        text: newFormattedText,
+        selection: updateCursorPosition(newFormattedText),
+      );
+    }
+  }
+
+  TextSelection updateCursorPosition(String text) {
+    return TextSelection.collapsed(offset: text.length);
+  }
 }
 
 class MyApp extends StatelessWidget {
@@ -10,11 +59,20 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'Flutter Form Example',
-      theme: ThemeData(primaryColor: Colors.blue),
-      home: const MyFormPage(),
+    return SizedBox(
+      width: 200,
+      child: MaterialApp(
+        debugShowCheckedModeBanner: false,
+        title: 'Flutter Form Example',
+        theme: ThemeData(
+          useMaterial3: true,
+          colorScheme: ColorScheme.light(
+            primary: Color(0xFF1877F2), // Exact Facebook Blue
+            secondary: Color(0xFF1877F2),
+          ),
+        ),
+        home: const MyFormPage(),
+      ),
     );
   }
 }
@@ -42,6 +100,49 @@ class _MyFormPageState extends State<MyFormPage> {
   final NumberFormat _currencyFormat =
       NumberFormat.currency(locale: 'en_US', symbol: '\$');
 
+  // Variables to store API configurations
+  Map<String, dynamic> _config = {};
+  List<String> _repaymentDelayOptions = [];
+  List<String> _revenueSharedFrequencyOptions = [];
+  List<String> _useOfFundsOptions = [];
+  double _desiredFeePercentage = 0.5; // Default value
+  double _fundingAmountMin = 25000; // Default value
+  double _fundingAmountMax = 750000; // Default value
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchConfig(); // Fetch configuration when the page loads
+  }
+
+  // Fetch configuration from the API
+  Future<void> _fetchConfig() async {
+    final response = await http.get(Uri.parse(
+        'https://gist.githubusercontent.com/motgi/8fc373cbfccee534c820875ba20ae7b5/raw/7143758ff2caa773e651dc3576de57cc829339c0/config.json'));
+    if (response.statusCode == 200) {
+      final List<dynamic> configList = json.decode(response.body);
+      setState(() {
+        _config = {for (var item in configList) item['name']: item};
+        _repaymentDelayOptions =
+            _config['desired_repayment_delay']?['value'].split('*') ?? [];
+        _revenueSharedFrequencyOptions =
+            _config['revenue_shared_frequency']?['value'].split('*') ?? [];
+        _useOfFundsOptions = _config['use_of_funds']?['value'].split('*') ?? [];
+        _desiredFeePercentage = double.tryParse(
+                _config['desired_fee_percentage']?['value'] ?? '0.5') ??
+            0.5;
+        _fundingAmountMin = double.tryParse(
+                _config['funding_amount_min']?['value'] ?? '25000') ??
+            25000;
+        _fundingAmountMax = double.tryParse(
+                _config['funding_amount_max']?['value'] ?? '750000') ??
+            750000;
+      });
+    } else {
+      throw Exception('Failed to load configuration');
+    }
+  }
+
   void _addRow() {
     if (_purposeController.text.isNotEmpty &&
         _descriptionController.text.isNotEmpty &&
@@ -65,6 +166,16 @@ class _MyFormPageState extends State<MyFormPage> {
     });
   }
 
+  // Calculate repayment rate
+  double _calculateRepaymentRate() {
+    if (_revenueController.text.isEmpty || _sliderValue == null) return 0.0;
+    final revenueAmount = double.tryParse(
+            _revenueController.text.replaceAll(",", "").replaceAll("\$", "")) ??
+        0.0;
+    final loanAmount = _sliderValue ?? 0.0;
+    return (0.156 / 6.2055 / revenueAmount) * (loanAmount * 10) * 100;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -72,27 +183,50 @@ class _MyFormPageState extends State<MyFormPage> {
         title: const Text('Financing Options'),
       ),
       body: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 15.0, horizontal: 80.0),
+        padding: const EdgeInsets.symmetric(vertical: 15.0, horizontal: 200.0),
         child: Form(
           key: _formKey,
           child: ListView(
             children: [
-              RichText(
-                text: const TextSpan(
-                  text: 'What is your annual business revenue?',
-                  style: TextStyle(color: Colors.black, fontSize: 16),
-                  children: [
-                    TextSpan(
-                      text: '*',
-                      style: TextStyle(color: Colors.red, fontSize: 16),
-                    ),
-                  ],
+              // Revenue Amount Field
+              Padding(
+                padding: const EdgeInsets.all(8.0),
+                child: RichText(
+                  text: TextSpan(
+                    text: _config['revenue_amount']?['label'] ??
+                        'What is your annual business revenue?',
+                    style: const TextStyle(color: Colors.black, fontSize: 18),
+                    children: const [
+                      TextSpan(
+                        text: '*',
+                        style: TextStyle(color: Colors.red, fontSize: 18),
+                      ),
+                    ],
+                  ),
                 ),
               ),
               TextFormField(
+                inputFormatters: [
+                  FilteringTextInputFormatter.digitsOnly,
+                  ThousandsSeparatorInputFormatter()
+                ],
                 controller: _revenueController,
                 keyboardType: TextInputType.number,
-                decoration: const InputDecoration(prefixText: '\$ ', filled: true),
+                style: TextStyle(fontSize: 18),
+                decoration: InputDecoration(
+                  border: OutlineInputBorder(
+                      borderRadius:
+                          BorderRadius.vertical(top: Radius.circular(10.0)),
+                      borderSide: BorderSide.none // Change border radius
+                      ),
+                  labelText: '250,000',
+                  prefixIcon: Padding(
+                    padding: EdgeInsets.all(10.0), // Adjust spacing as needed
+                    child: Text('\$ '), // Your prefix text
+                  ),
+                  filled: true, // Enable background fill
+                  fillColor: Colors.grey[200], // Set greyish background color
+                ),
                 validator: (value) {
                   if (value == null || value.isEmpty) {
                     return 'Please enter a number';
@@ -107,7 +241,9 @@ class _MyFormPageState extends State<MyFormPage> {
                       value.replaceAll(',', '').replaceAll('\$', ''));
                   if (revenue != null) {
                     setState(() {
-                      _maxSliderValue = revenue / 3;
+                      // Set max slider value to 1/3 of the revenue
+                      _maxSliderValue = (revenue / 3)
+                          .clamp(_fundingAmountMin, _fundingAmountMax);
                       _sliderValue =
                           null; // Reset slider value when revenue changes.
                     });
@@ -115,126 +251,192 @@ class _MyFormPageState extends State<MyFormPage> {
                 },
               ),
               const SizedBox(height: 20),
+
+              // Desired Loan Amount Slider
               Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('What is your desired loan amount?'),
+                  Text(
+                      _config['funding_amount']?['label'] ??
+                          'What is your desired loan amount?',
+                      style: const TextStyle(fontSize: 18)),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(_currencyFormat.format(0)),
-                      Text(_currencyFormat.format(_maxSliderValue)),
+                      Text(_currencyFormat.format(_fundingAmountMin),
+                          style: TextStyle(fontSize: 18)),
+                      Text(_currencyFormat.format(_maxSliderValue),
+                          style: TextStyle(fontSize: 18)),
                     ],
                   ),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Slider(
-                          value: _sliderValue ?? 0,
-                          min: 0,
-                          max: _maxSliderValue,
-                          divisions: 100,
-                          label: _sliderValue != null
-                              ? _currencyFormat.format(_sliderValue)
-                              : 'Select a value',
-                          onChanged: (value) {
-                            setState(() {
-                              _sliderValue = value;
-                            });
-                          },
-                        ),
-                      ),
-                      SizedBox(
-                        width: 100,
-                        child: TextFormField(
-                          controller: TextEditingController(
-                            text: _sliderValue != null
-                                ? _sliderValue!.toStringAsFixed(0)
-                                : '',
-                          ),
-                          keyboardType: TextInputType.number,
-                          decoration: const InputDecoration(
-                            border: OutlineInputBorder(),
-                            prefixText: '\$',
-                          ),
-                          textAlign: TextAlign.center,
-                          onChanged: (value) {
-                            final newValue = double.tryParse(
-                                value.replaceAll(',', '').replaceAll('\$', ''));
-                            if (newValue != null) {
+                  Padding(
+                    padding: const EdgeInsets.all(8.0),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Slider(
+                            value: _sliderValue ?? _fundingAmountMin,
+                            min: _fundingAmountMin,
+                            max: _maxSliderValue, // Dynamic max value
+                            divisions: 100,
+                            label: _sliderValue != null
+                                ? _currencyFormat.format(_sliderValue)
+                                : 'Select a value',
+                            onChanged: (value) {
                               setState(() {
-                                _sliderValue =
-                                    newValue.clamp(0, _maxSliderValue);
+                                _sliderValue = value;
                               });
-                            }
-                          },
+                            },
+                          ),
                         ),
-                      ),
-                    ],
+                        SizedBox(
+                          width: 140,
+                          child: TextFormField(
+                            controller: TextEditingController(
+                              text: _sliderValue != null
+                                  ? NumberFormat('#,###').format(_sliderValue)
+                                  : '',
+                            ),
+                            inputFormatters: [
+                              FilteringTextInputFormatter.digitsOnly,
+                              ThousandsSeparatorInputFormatter()
+                            ],
+                            keyboardType: TextInputType.number,
+                            decoration: InputDecoration(
+                              border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.vertical(
+                                      top: Radius.circular(10.0)),
+                                  borderSide:
+                                      BorderSide.none // Change border radius
+                                  ),
+                              prefixIcon: Padding(
+                                padding: EdgeInsets.all(
+                                    10.0), // Adjust spacing as needed
+                                child: Text('\$ '), // Your prefix text
+                              ),
+                              filled: true, // Enable background fill
+                              fillColor: Colors
+                                  .grey[200], // Set greyish background color
+                            ),
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                                color: Color(0xFF1877F2),
+                                fontWeight: FontWeight.bold,
+                                fontSize: 18),
+                            onChanged: (value) {
+                              final newValue = double.tryParse(value
+                                  .replaceAll(',', '')
+                                  .replaceAll('\$', ''));
+                              if (newValue != null) {
+                                setState(() {
+                                  _sliderValue = newValue.clamp(
+                                      _fundingAmountMin, _maxSliderValue);
+                                });
+                              }
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ],
               ),
               const SizedBox(height: 10),
-              if (_sliderValue != null && _revenueController.text.isNotEmpty)
-                Text(
-                  'Revenue share percentage: ${((0.156 / 6.2055 / double.parse(_revenueController.text.replaceAll(",", "").replaceAll(r"\$", ""))) * (_sliderValue! * 10) * 100).toStringAsFixed(2)}%',
-                  style: const TextStyle(fontSize: 16),
+
+              // Revenue Percentage
+              RichText(
+                text: TextSpan(
+                  style: const TextStyle(
+                      fontSize: 18, color: Colors.black), // Default style
+                  children: [
+                    const TextSpan(text: 'Revenue Percentage '),
+                    TextSpan(
+                      text: '${_calculateRepaymentRate().toStringAsFixed(2)}%',
+                      style: const TextStyle(
+                          color: Color(0xFF1877F2),
+                          fontWeight: FontWeight.bold), // Apply custom color
+                    ),
+                  ],
                 ),
+              ),
               const SizedBox(height: 20),
+
+              // Revenue Shared Frequency Radio Buttons
               Row(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  const Text('Revenue Shared Frequency:'),
+                  Text('Revenue Shared Frequency',
+                      style: const TextStyle(fontSize: 18)),
                   const SizedBox(width: 16),
                   Row(
-                    children: [
-                      Row(
+                    children: _revenueSharedFrequencyOptions.map((option) {
+                      return Row(
                         children: [
-                          Radio<String>(
-                            value: 'monthly',
-                            groupValue: _selectedRadio,
-                            onChanged: (String? value) {
-                              setState(() {
-                                _selectedRadio = value;
-                              });
-                            },
+                          Padding(
+                            padding: const EdgeInsets.all(8.0),
+                            child: Radio<String>(
+                              value: option,
+                              groupValue: _selectedRadio,
+                              onChanged: (String? value) {
+                                setState(() {
+                                  _selectedRadio = value;
+                                });
+                              },
+                            ),
                           ),
-                          const Text('Monthly'),
+                          Text(
+                              option[0].toUpperCase() +
+                                  option.substring(1).toLowerCase(),
+                              style: TextStyle(fontSize: 18)),
                         ],
-                      ),
-                      const SizedBox(width: 16),
-                      Row(
-                        children: [
-                          Radio<String>(
-                            value: 'weekly',
-                            groupValue: _selectedRadio,
-                            onChanged: (String? value) {
-                              setState(() {
-                                _selectedRadio = value;
-                              });
-                            },
-                          ),
-                          const Text('Weekly'),
-                        ],
-                      ),
-                    ],
+                      );
+                    }).toList(),
                   ),
                 ],
               ),
-              const SizedBox(height: 20),
+              const SizedBox(height: 10),
+
+              // Desired Repayment Delay Dropdown
               Row(
                 children: [
-                  const Text('Desired Repayment Delay:'),
-                  const Spacer(),
+                  Text('Desired Repayment Delay',
+                      style: const TextStyle(fontSize: 18)),
+                  SizedBox(width: 20),
                   SizedBox(
                     width: 200,
                     child: DropdownButtonFormField<String>(
+                      decoration: InputDecoration(
+                        filled: true, // Fill the background
+                        fillColor:
+                            Colors.grey[200], // Change the background color
+                        enabledBorder: OutlineInputBorder(
+                          // Remove the underline
+                          borderSide: BorderSide.none,
+                          borderRadius: BorderRadius.only(
+                            // Add border radius to the top
+                            topLeft: Radius.circular(10),
+                            topRight: Radius.circular(10),
+                          ),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          // Remove the underline on focus
+                          borderSide: BorderSide.none,
+                          borderRadius: BorderRadius.only(
+                            topLeft: Radius.circular(10),
+                            topRight: Radius.circular(10),
+                          ),
+                        ),
+                      ),
                       value: _selectedDropdown,
-                      items: <String>['30 days', '60 days', '90 days']
-                          .map((String value) {
+                      items: _repaymentDelayOptions.map((String value) {
                         return DropdownMenuItem<String>(
                           value: value,
-                          child: Text(value),
+                          child: Text(value,
+                              style: TextStyle(
+                                  color: _selectedDropdown == value
+                                      ? Color(0xFF1877F2)
+                                      : null,
+                                  fontSize: 18)),
                         );
                       }).toList(),
                       onChanged: (String? newValue) {
@@ -249,7 +451,10 @@ class _MyFormPageState extends State<MyFormPage> {
                 ],
               ),
               const SizedBox(height: 20),
-              const Text('What will you use the funds for?'),
+
+              // Use of Funds Dropdown
+              const Text('What will you use the funds for?',
+                  style: TextStyle(fontSize: 18)),
               const SizedBox(height: 10),
               Row(
                 children: [
@@ -257,23 +462,42 @@ class _MyFormPageState extends State<MyFormPage> {
                     flex: 3,
                     child: DropdownButtonFormField<String>(
                       value: null,
-                      items: <String>[
-                        'Marketing',
-                        'Personnel',
-                        'Working Capital',
-                        'Inventory',
-                        'Machinery/Equipment',
-                        'Other',
-                      ].map((String value) {
+                      items: _useOfFundsOptions.map((String value) {
                         return DropdownMenuItem<String>(
                           value: value,
-                          child: Text(value),
+                          child: Text(value,
+                              style: TextStyle(
+                                  fontSize: 17,
+                                  color: _purposeController.text == value
+                                      ? Color(0xFF1877F2)
+                                      : null)),
                         );
                       }).toList(),
                       onChanged: (String? newValue) {
                         _purposeController.text = newValue!;
                       },
-                      decoration: const InputDecoration(labelText: 'Purpose'),
+                      decoration: InputDecoration(
+                          filled: true, // Fill the background
+                          fillColor:
+                              Colors.grey[200], // Change the background color
+                          enabledBorder: OutlineInputBorder(
+                            // Remove the underline
+                            borderSide: BorderSide.none,
+                            borderRadius: BorderRadius.only(
+                              // Add border radius to the top
+                              topLeft: Radius.circular(10),
+                              topRight: Radius.circular(10),
+                            ),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            // Remove the underline on focus
+                            borderSide: BorderSide.none,
+                            borderRadius: BorderRadius.only(
+                              topLeft: Radius.circular(10),
+                              topRight: Radius.circular(10),
+                            ),
+                          ),
+                          labelText: 'Purpose'),
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -281,8 +505,17 @@ class _MyFormPageState extends State<MyFormPage> {
                     flex: 4,
                     child: TextFormField(
                       controller: _descriptionController,
-                      decoration:
-                          const InputDecoration(labelText: 'Description'),
+                      decoration: InputDecoration(
+                        labelText: 'Description',
+                        border: OutlineInputBorder(
+                            borderRadius: BorderRadius.vertical(
+                                top: Radius.circular(10.0)),
+                            borderSide: BorderSide.none // Change border radius
+                            ),
+                        filled: true, // Enable background fill
+                        fillColor:
+                            Colors.grey[200], // Set greyish background color
+                      ),
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -290,9 +523,26 @@ class _MyFormPageState extends State<MyFormPage> {
                     flex: 3,
                     child: TextFormField(
                       controller: _amountController,
-                      decoration: const InputDecoration(
-                        prefixText: '\$ ',
+                      decoration: InputDecoration(
+                        labelText: 'Amount',
+                        border: OutlineInputBorder(
+                            borderRadius: BorderRadius.vertical(
+                                top: Radius.circular(10.0)),
+                            borderSide: BorderSide.none // Change border radius
+                            ),
+                        prefixIcon: Padding(
+                          padding:
+                              EdgeInsets.all(10.0), // Adjust spacing as needed
+                          child: Text('\$ '), // Your prefix text
+                        ),
+                        filled: true, // Enable background fill
+                        fillColor:
+                            Colors.grey[200], // Set greyish background color
                       ),
+                      inputFormatters: [
+                        FilteringTextInputFormatter.digitsOnly,
+                        ThousandsSeparatorInputFormatter()
+                      ],
                       keyboardType: TextInputType.number,
                     ),
                   ),
@@ -303,6 +553,8 @@ class _MyFormPageState extends State<MyFormPage> {
                 ],
               ),
               const SizedBox(height: 20),
+
+              // Additional Rows List
               ListView.builder(
                 shrinkWrap: true,
                 physics: const NeverScrollableScrollPhysics(),
@@ -320,67 +572,92 @@ class _MyFormPageState extends State<MyFormPage> {
                 },
               ),
               const SizedBox(height: 20),
-              ElevatedButton(
-                onPressed: () {
-                  if (_formKey.currentState!.validate() &&
-                      _sliderValue != null) {
-                    // Get the values to pass to the ResultsPage
-                    final double businessRevenue = double.parse(
-                        _revenueController.text
-                            .replaceAll(",", "")
-                            .replaceAll("\$", ""));
-                    final double fundingAmount = _sliderValue ?? 0;
-                    final double fees = fundingAmount * 0.5;
-                    final double totalRevenueShare = fundingAmount + fees;
-                    final double revenueSharePercentage =
-                        ((0.156 / 6.2055 / businessRevenue) *
-                            (fundingAmount * 10) *
-                            100);
 
-                    // Calculate expected transfers
-                    final expectedTransfers = revenueSharePercentage != 0
-                        ? (totalRevenueShare *
-                                (_selectedRadio == 'weekly' ? 52 : 12)) /
-                            (businessRevenue * revenueSharePercentage)
-                        : 0;
+              // Next Button
+              Row(
+                children: [
+                  SizedBox(
+                    width: MediaQuery.of(context).size.width * 0.4,
+                    height: 60,
+                    child: ElevatedButton(
+                      onPressed: () {
+                        // Inside the onPressed method of the NEXT button
+                        if (_formKey.currentState!.validate() &&
+                            _sliderValue != null) {
+                          // Logic for navigation
+                          final double businessRevenue = double.parse(
+                              _revenueController.text
+                                  .replaceAll(",", "")
+                                  .replaceAll("\$", ""));
+                          final double fundingAmount = _sliderValue ?? 0;
+                          final double fees =
+                              fundingAmount * _desiredFeePercentage;
+                          final double totalRevenueShare = fundingAmount + fees;
+                          final double revenueSharePercentage =
+                              6.03; // Directly use the provided percentage
 
-                    // Cast expectedTransfers to double
-                    final double expectedTransfersDouble =
-                        expectedTransfers.toDouble();
+                          final expectedTransfers = revenueSharePercentage != 0
+                              ? (_selectedRadio == 'weekly'
+                                  ? (totalRevenueShare * 52) /
+                                      (businessRevenue *
+                                          (revenueSharePercentage / 100))
+                                  : (totalRevenueShare * 12) /
+                                      (businessRevenue *
+                                          (revenueSharePercentage / 100)))
+                              : 0;
 
-                    // Calculate expected completion date
-                    final repaymentDelay = int.tryParse(_selectedDropdown
-                                ?.replaceAll(RegExp(r'[^0-9]'), '') ??
-                            '0') ??
-                        0;
-                    final expectedCompletionDate = DateTime.now().add(
-                      Duration(
-                        days: (_selectedRadio == 'weekly'
-                                    ? expectedTransfersDouble * 7
-                                    : expectedTransfersDouble * 30)
-                                .toInt() +
-                            repaymentDelay,
+                          final expectedTransfersDouble =
+                              expectedTransfers.ceil().toDouble();
+
+                          final repaymentDelay = int.tryParse(_selectedDropdown
+                                      ?.replaceAll(RegExp(r'[^0-9]'), '') ??
+                                  '0') ??
+                              0;
+                          final expectedCompletionDate = DateTime.now().add(
+                            Duration(
+                              days: (_selectedRadio == 'weekly'
+                                          ? expectedTransfersDouble * 7
+                                          : expectedTransfersDouble * 30)
+                                      .toInt() +
+                                  repaymentDelay,
+                            ),
+                          );
+
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => ResultsPage(
+                                businessRevenue: businessRevenue,
+                                fundingAmount: fundingAmount,
+                                fees: fees,
+                                totalRevenueShare: totalRevenueShare,
+                                expectedTransfers: expectedTransfersDouble,
+                                revenueShareFrequency: _selectedRadio ?? '',
+                                expectedCompletionDate: expectedCompletionDate,
+                              ),
+                            ),
+                          );
+                        }
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor:
+                            Color(0xFF1877F2), // Set background color to blue
+                        foregroundColor:
+                            Colors.white, // Set font color to white
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        minimumSize: const Size(double.infinity, 60),
                       ),
-                    );
-
-                    // Navigate to the Results page
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => ResultsPage(
-                          businessRevenue: businessRevenue,
-                          fundingAmount: fundingAmount,
-                          fees: fees,
-                          totalRevenueShare: totalRevenueShare,
-                          expectedTransfers: expectedTransfersDouble,
-                          revenueShareFrequency: _selectedRadio ?? '',
-                          expectedCompletionDate: expectedCompletionDate,
+                      child: const Text(
+                        'NEXT',
+                        style: TextStyle(
+                          fontSize: 18,
                         ),
                       ),
-                    );
-                  }
-                },
-                child: const Text('Next'),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
@@ -399,7 +676,7 @@ class ResultsPage extends StatelessWidget {
   final String revenueShareFrequency;
   final DateTime expectedCompletionDate;
 
-  ResultsPage({
+  const ResultsPage({
     required this.businessRevenue,
     required this.fundingAmount,
     required this.fees,
@@ -412,28 +689,91 @@ class ResultsPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Results')),
+      appBar: AppBar(
+        title: const Text('Results',
+            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 22)),
+      ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: ListView(
           children: [
-            Text(
-                'Annual Business Revenue: \$${businessRevenue.toStringAsFixed(2)}'),
+            _buildRow('Annual Business Revenue:', businessRevenue),
             const SizedBox(height: 10),
-            Text('Funding Amount: \$${fundingAmount.toStringAsFixed(2)}'),
+            _buildRow('Funding Amount:', fundingAmount),
             const SizedBox(height: 10),
-            Text('Fees (50%): \$${fees.toStringAsFixed(2)}'),
+            _buildRow(
+                'Fees (${(fees / fundingAmount * 100).toStringAsFixed(2)}%):',
+                fees),
             const SizedBox(height: 10),
-            Text(
-                'Total Revenue Share: \$${totalRevenueShare.toStringAsFixed(2)}'),
+            Divider(
+              thickness: 1,
+              color: Color(0xFFC4C4C4),
+              indent: MediaQuery.of(context).size.width * 0.1,
+              endIndent: MediaQuery.of(context).size.width * 0.1,
+            ),
+            _buildRow('Total Revenue Share:', totalRevenueShare),
             const SizedBox(height: 10),
-            Text(
-                'Expected Transfers: ${expectedTransfers.toStringAsFixed(2)} ${revenueShareFrequency == 'weekly' ? 'weeks' : 'months'}'),
+            _buildRow('Expected Transfers:', expectedTransfers),
             const SizedBox(height: 10),
-            Text(
-                'Expected Completion Date: ${DateFormat.yMMMd().format(expectedCompletionDate)}'),
+            _buildRow('Expected Completion Date:',
+                DateFormat.yMMMd().format(expectedCompletionDate)),
+            const SizedBox(height: 20),
+            SizedBox(
+              width: MediaQuery.of(context).size.width * 0.4,
+              height: 60,
+              child: ElevatedButton(
+                onPressed: () {
+                  Navigator.pop(context); // Navigate back to the form page
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor:
+                      Colors.white, // Set background color to white
+                  foregroundColor: Color(0xFF1877F2), // Set font color to blue
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  minimumSize: const Size(double.infinity, 60),
+                ),
+                child: const Text(
+                  'BACK',
+                  style: TextStyle(
+                    fontSize: 18,
+                  ),
+                ),
+              ),
+            ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildRow(String label, dynamic value, {String? unit}) {
+    return Padding(
+      padding: const EdgeInsets.all(8.0),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            label,
+            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 22),
+          ),
+          Text(
+            unit != null
+                ? NumberFormat('#,###').format(value.ceil())
+                : value is double
+                    ? (label.contains(
+                            'Expected Transfers') // Check if it's expectedTransfers
+                        ? NumberFormat('#,###')
+                            .format(value.ceil()) // No dollar sign
+                        : '\$ ${NumberFormat('#,###.##').format(value)}') // Add dollar sign for other values
+                    : value.toString(),
+            style: TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 22,
+                color: value is String ? Color(0xFF1877F2) : null),
+          ),
+        ],
       ),
     );
   }
