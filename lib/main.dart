@@ -90,12 +90,14 @@ class _MyFormPageState extends State<MyFormPage> {
 
   double? _sliderValue;
   double _maxSliderValue = 50000; // Default max value, updated dynamically.
-  String? _selectedRadio;
+  String? _selectedRevenueSharedFrequency;
   String? _selectedDropdown;
   final List<Map<String, dynamic>> _additionalRows = [];
   final _purposeController = TextEditingController();
   final _descriptionController = TextEditingController();
   final _amountController = TextEditingController();
+  double _revenuePercentageMin = 0;
+  double _revenuePercentageMax = 100;
 
   final NumberFormat _currencyFormat =
       NumberFormat.currency(locale: 'en_US', symbol: '\$');
@@ -106,8 +108,11 @@ class _MyFormPageState extends State<MyFormPage> {
   List<String> _revenueSharedFrequencyOptions = [];
   List<String> _useOfFundsOptions = [];
   double _desiredFeePercentage = 0.5; // Default value
+  double _revenuePercentage = 0;
+  double _expectedAPR = 0;
   double _fundingAmountMin = 25000; // Default value
   double _fundingAmountMax = 750000; // Default value
+
 
   @override
   void initState() {
@@ -137,6 +142,8 @@ class _MyFormPageState extends State<MyFormPage> {
         _fundingAmountMax = double.tryParse(
                 _config['funding_amount_max']?['value'] ?? '750000') ??
             750000;
+        _revenuePercentageMin = double.tryParse(_config['revenue_percentage_min']?['value']?? '0') ?? 0;
+        _revenuePercentageMax = double.tryParse(_config['revenue_percentage_max']?['value']?? '100') ?? 100;
       });
     } else {
       throw Exception('Failed to load configuration');
@@ -166,14 +173,17 @@ class _MyFormPageState extends State<MyFormPage> {
     });
   }
 
-  // Calculate repayment rate
-  double _calculateRepaymentRate() {
+  // Calculate revenue percentage
+  double _calculateRevenuePercentage() {
     if (_revenueController.text.isEmpty || _sliderValue == null) return 0.0;
     final revenueAmount = double.tryParse(
             _revenueController.text.replaceAll(",", "").replaceAll("\$", "")) ??
         0.0;
     final loanAmount = _sliderValue ?? 0.0;
-    return (0.156 / 6.2055 / revenueAmount) * (loanAmount * 10) * 100;
+    _revenuePercentage =
+        (0.156 / 6.2055 / revenueAmount) * (loanAmount * 10) * 100;
+         _revenuePercentage = _revenuePercentage.clamp(_revenuePercentageMin, _revenuePercentageMax);
+    return _revenuePercentage;
   }
 
   @override
@@ -351,7 +361,7 @@ class _MyFormPageState extends State<MyFormPage> {
                   children: [
                     const TextSpan(text: 'Revenue Percentage '),
                     TextSpan(
-                      text: '${_calculateRepaymentRate().toStringAsFixed(2)}%',
+                      text: '${_calculateRevenuePercentage().toStringAsFixed(2)}%',
                       style: const TextStyle(
                           color: Color(0xFF1877F2),
                           fontWeight: FontWeight.bold), // Apply custom color
@@ -376,10 +386,10 @@ class _MyFormPageState extends State<MyFormPage> {
                             padding: const EdgeInsets.all(8.0),
                             child: Radio<String>(
                               value: option,
-                              groupValue: _selectedRadio,
+                              groupValue: _selectedRevenueSharedFrequency,
                               onChanged: (String? value) {
                                 setState(() {
-                                  _selectedRadio = value;
+                                  _selectedRevenueSharedFrequency = value;
                                 });
                               },
                             ),
@@ -593,17 +603,15 @@ class _MyFormPageState extends State<MyFormPage> {
                           final double fees =
                               fundingAmount * _desiredFeePercentage;
                           final double totalRevenueShare = fundingAmount + fees;
-                          final double revenueSharePercentage =
-                              6.03; // Directly use the provided percentage
 
-                          final expectedTransfers = revenueSharePercentage != 0
-                              ? (_selectedRadio == 'weekly'
+                          final expectedTransfers = _revenuePercentage != 0
+                              ? (_selectedRevenueSharedFrequency == 'weekly'
                                   ? (totalRevenueShare * 52) /
                                       (businessRevenue *
-                                          (revenueSharePercentage / 100))
+                                          (_revenuePercentage / 100))
                                   : (totalRevenueShare * 12) /
                                       (businessRevenue *
-                                          (revenueSharePercentage / 100)))
+                                          (_revenuePercentage / 100)))
                               : 0;
 
                           final expectedTransfersDouble =
@@ -615,13 +623,22 @@ class _MyFormPageState extends State<MyFormPage> {
                               0;
                           final expectedCompletionDate = DateTime.now().add(
                             Duration(
-                              days: (_selectedRadio == 'weekly'
+                              days: (_selectedRevenueSharedFrequency == 'weekly'
                                           ? expectedTransfersDouble * 7
                                           : expectedTransfersDouble * 30)
                                       .toInt() +
                                   repaymentDelay,
                             ),
                           );
+
+                          final differenceInDays = expectedCompletionDate
+                              .difference(DateTime.now())
+                              .inDays;
+                          _expectedAPR =
+                              ((((_desiredFeePercentage * fundingAmount)) /
+                                          (fundingAmount)) /
+                                      (differenceInDays)) *
+                                  (365 * 100);
 
                           Navigator.push(
                             context,
@@ -632,8 +649,9 @@ class _MyFormPageState extends State<MyFormPage> {
                                 fees: fees,
                                 totalRevenueShare: totalRevenueShare,
                                 expectedTransfers: expectedTransfersDouble,
-                                revenueShareFrequency: _selectedRadio ?? '',
+                                revenueShareFrequency: _selectedRevenueSharedFrequency ?? '',
                                 expectedCompletionDate: expectedCompletionDate,
+                                expectedAPR: _expectedAPR,
                               ),
                             ),
                           );
@@ -667,6 +685,7 @@ class _MyFormPageState extends State<MyFormPage> {
   }
 }
 
+
 class ResultsPage extends StatelessWidget {
   final double businessRevenue;
   final double fundingAmount;
@@ -675,6 +694,7 @@ class ResultsPage extends StatelessWidget {
   final double expectedTransfers;
   final String revenueShareFrequency;
   final DateTime expectedCompletionDate;
+  final double expectedAPR;
 
   const ResultsPage({
     required this.businessRevenue,
@@ -684,10 +704,51 @@ class ResultsPage extends StatelessWidget {
     required this.expectedTransfers,
     required this.revenueShareFrequency,
     required this.expectedCompletionDate,
+    required this.expectedAPR,
   });
 
   @override
   Widget build(BuildContext context) {
+    // Define a list of label-value pairs with their formatting rules
+    final List<ResultRow> results = [
+      ResultRow(
+        label: 'Annual Business Revenue:',
+        value: businessRevenue,
+        format: (value) => '\$ ${NumberFormat('#,###.##').format(value)}',
+      ),
+      ResultRow(
+        label: 'Funding Amount:',
+        value: fundingAmount,
+        format: (value) => '\$ ${NumberFormat('#,###.##').format(value)}',
+      ),
+      ResultRow(
+        label: 'Fees (${(fees / fundingAmount * 100).toStringAsFixed(2)}%):',
+        value: fees,
+        format: (value) => '\$ ${NumberFormat('#,###.##').format(value)}',
+      ),
+      ResultRow(
+        label: 'Expected APR Rate:',
+        value: expectedAPR,
+        format: (value) => '${NumberFormat('#,###.##').format(value)}%',
+        hasDivider: true, // Add a divider below this row
+      ),
+      ResultRow(
+        label: 'Total Revenue Share:',
+        value: totalRevenueShare,
+        format: (value) => '\$ ${NumberFormat('#,###.##').format(value)}',
+      ),
+      ResultRow(
+        label: 'Expected Transfers:',
+        value: expectedTransfers,
+        format: (value) => NumberFormat('#,###').format(value.ceil()),
+      ),
+      ResultRow(
+        label: 'Expected Completion Date:',
+        value: DateFormat.yMMMd().format(expectedCompletionDate),
+        format: (value) => value.toString(),
+      ),
+    ];
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Results',
@@ -697,26 +758,20 @@ class ResultsPage extends StatelessWidget {
         padding: const EdgeInsets.all(16.0),
         child: ListView(
           children: [
-            _buildRow('Annual Business Revenue:', businessRevenue),
-            const SizedBox(height: 10),
-            _buildRow('Funding Amount:', fundingAmount),
-            const SizedBox(height: 10),
-            _buildRow(
-                'Fees (${(fees / fundingAmount * 100).toStringAsFixed(2)}%):',
-                fees),
-            const SizedBox(height: 10),
-            Divider(
-              thickness: 1,
-              color: Color(0xFFC4C4C4),
-              indent: MediaQuery.of(context).size.width * 0.1,
-              endIndent: MediaQuery.of(context).size.width * 0.1,
-            ),
-            _buildRow('Total Revenue Share:', totalRevenueShare),
-            const SizedBox(height: 10),
-            _buildRow('Expected Transfers:', expectedTransfers),
-            const SizedBox(height: 10),
-            _buildRow('Expected Completion Date:',
-                DateFormat.yMMMd().format(expectedCompletionDate)),
+            ...results.map((result) {
+              return Column(
+                children: [
+                  _buildRow(result),
+                  if (result.hasDivider) // Conditionally add a divider
+                    Divider(
+                      thickness: 1,
+                      color: const Color(0xFFC4C4C4),
+                      indent: MediaQuery.of(context).size.width * 0.1,
+                      endIndent: MediaQuery.of(context).size.width * 0.1,
+                    ),
+                ],
+              );
+            }).toList(),
             const SizedBox(height: 20),
             SizedBox(
               width: MediaQuery.of(context).size.width * 0.4,
@@ -726,9 +781,8 @@ class ResultsPage extends StatelessWidget {
                   Navigator.pop(context); // Navigate back to the form page
                 },
                 style: ElevatedButton.styleFrom(
-                  backgroundColor:
-                      Colors.white, // Set background color to white
-                  foregroundColor: Color(0xFF1877F2), // Set font color to blue
+                  backgroundColor: Colors.white,
+                  foregroundColor: const Color(0xFF1877F2),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(20),
                   ),
@@ -748,33 +802,41 @@ class ResultsPage extends StatelessWidget {
     );
   }
 
-  Widget _buildRow(String label, dynamic value, {String? unit}) {
+  Widget _buildRow(ResultRow result) {
     return Padding(
       padding: const EdgeInsets.all(8.0),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           Text(
-            label,
-            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 22),
+            result.label,
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 22),
           ),
           Text(
-            unit != null
-                ? NumberFormat('#,###').format(value.ceil())
-                : value is double
-                    ? (label.contains(
-                            'Expected Transfers') // Check if it's expectedTransfers
-                        ? NumberFormat('#,###')
-                            .format(value.ceil()) // No dollar sign
-                        : '\$ ${NumberFormat('#,###.##').format(value)}') // Add dollar sign for other values
-                    : value.toString(),
+            result.format(result.value),
             style: TextStyle(
-                fontWeight: FontWeight.bold,
-                fontSize: 22,
-                color: value is String ? Color(0xFF1877F2) : null),
+              fontWeight: FontWeight.bold,
+              fontSize: 22,
+              color: result.value is String ? const Color(0xFF1877F2) : null,
+            ),
           ),
         ],
       ),
     );
   }
+}
+
+/// A class to represent a row in the results page.
+class ResultRow {
+  final String label;
+  final dynamic value;
+  final String Function(dynamic value) format;
+  final bool hasDivider; // Add a flag for the divider
+
+  ResultRow({
+    required this.label,
+    required this.value,
+    required this.format,
+    this.hasDivider = false, // Default to false
+  });
 }
